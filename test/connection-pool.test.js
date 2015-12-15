@@ -11,6 +11,7 @@ var connectionConfig = {
         database: 'test'
     }
 };
+
 /* create a db user with the correct permissions:
 CREATE DATABASE test
 CREATE LOGIN test WITH PASSWORD=N'test', DEFAULT_DATABASE=test, CHECK_POLICY=OFF
@@ -32,7 +33,6 @@ ALTER LOGIN test DISABLE
 */
 
 describe('ConnectionPool', function () {
-
     it('min', function (done) {
         this.timeout(10000);
 
@@ -42,7 +42,7 @@ describe('ConnectionPool', function () {
         setTimeout(function() {
             assert.equal(pool.connections.length, poolConfig.min);
             pool.drain(done);
-        }, 100);
+        }, 4);
     });
 
     it('min=0', function (done) {
@@ -53,7 +53,7 @@ describe('ConnectionPool', function () {
 
         setTimeout(function() {
             assert.equal(pool.connections.length, 0);
-        }, 100);
+        }, 4);
 
         setTimeout(function() {
             pool.acquire(function(err, connection) {
@@ -110,15 +110,83 @@ describe('ConnectionPool', function () {
         };
 
         for (var i = 0; i < count; i++) {
-            setImmediate(function() {
+            setTimeout(function() {
                 pool.acquire(createRequest);
-            });
+            }, 1);
         }
     });
 
+    it('min<=max, min specified > max specified', function (done) {
+        this.timeout(10000);
+
+        var poolConfig = { min: 5, max: 1, idleTimeout: 10};
+        var pool = new ConnectionPool(poolConfig, connectionConfig);
+
+        setTimeout(function() {
+            assert.equal(pool.connections.length, 1);
+        }, 4);
+
+        setTimeout(function() {
+            pool.acquire(function(err, connection) {
+                assert(!err);
+
+                var request = new Request('select 42', function (err, rowCount) {
+                    assert.strictEqual(rowCount, 1);
+                    connection.release();
+                    setTimeout(function () {
+                        assert.equal(pool.connections.length, 1);
+                        pool.drain(done);
+                    }, 200);
+                });
+
+                request.on('row', function (columns) {
+                    assert.strictEqual(columns[0].value, 42);
+                });
+
+                connection.execSql(request);
+            });
+        }, 2000);
+    });
+
+    it('min<=max, no min specified', function (done) {
+        this.timeout(10000);
+
+        var poolConfig = {max: 1, idleTimeout: 10};
+        var pool = new ConnectionPool(poolConfig, connectionConfig);
+
+        setTimeout(function() {
+            assert.equal(pool.connections.length, 1);
+        }, 4);
+
+        setTimeout(function() {
+            pool.acquire(function(err, connection) {
+                assert(!err);
+
+                var request = new Request('select 42', function (err, rowCount) {
+                    assert.strictEqual(rowCount, 1);
+                    connection.release();
+                    setTimeout(function () {
+                        assert.equal(pool.connections.length, 1);
+                        pool.drain(done);
+                    }, 200);
+                });
+
+                request.on('row', function (columns) {
+                    assert.strictEqual(columns[0].value, 42);
+                });
+
+                connection.execSql(request);
+            });
+        }, 2000);
+    });
+
     it('pool error event', function (done) {
-        var poolConfig = {min: 2, max: 5};
+        this.timeout(10000);
+        var poolConfig = {min: 3};
         var pool = new ConnectionPool(poolConfig, {});
+
+        pool.acquire(function() { });
+
         pool.on('error', function(err) {
             assert(!!err);
             pool.drain(done);
@@ -127,25 +195,17 @@ describe('ConnectionPool', function () {
 
     it('connection retry', function (done) {
         this.timeout(10000);
-        var poolConfig = {min: 3, max: 3, retryDelay: 2000 };
+        var poolConfig = {min: 1, max: 1, retryDelay: 2000 };
         var pool = new ConnectionPool(poolConfig, {});
 
-        var errors = 0;
-
         pool.on('error', function(err) {
-            if (++errors === 3) {
-                assert.equal(pool.connections.length, 0);
-                pool.connectionConfig = connectionConfig; //fix config so new connections succeed
+            assert.equal(pool.connections[0].status, 0); //PENDING
+            pool.connectionConfig = connectionConfig; //fix config so new connections succeed
 
-                setTimeout(function() {
-                    assert.equal(pool.connections.length, 0);
-                }, 1000);
-
-                setTimeout(function() {
-                    assert.equal(pool.connections.length, 3);
-                    done();
-                }, 3000)
-            }
+            setTimeout(function() {
+                assert.equal(pool.connections[0].status, 1); //FREE
+                done();
+            }, 3000)
         });
     });
 
@@ -191,14 +251,14 @@ describe('ConnectionPool', function () {
         }, 300);
     });
 
-    it('lost connection handling', function (done) {
+    it('connection error handling', function (done) {
         this.timeout(10000);
         var poolConfig = {min: 1, max: 5};
+
         var pool = new ConnectionPool(poolConfig, connectionConfig);
 
         pool.on('error', function(err) {
             assert(err && err.name === 'ConnectionError');
-            pool.drain(done);
         });
 
         //This simulates a lost connections by creating a job that kills the current session and then deletesthe job.
@@ -222,7 +282,8 @@ describe('ConnectionPool', function () {
             'SELECT 42';
 
             var request = new Request(command, function (err, rowCount) {
-                assert(!!err);
+                assert(err);
+                pool.drain(done);
             });
 
             request.on('row', function (columns) {
@@ -268,5 +329,19 @@ describe('ConnectionPool', function () {
                 });
             }));
         });
+    });
+
+    it('drain', function (done) {
+        this.timeout(10000);
+
+        var poolConfig = {min: 3};
+        var pool = new ConnectionPool(poolConfig, connectionConfig);
+
+        pool.acquire(function() { });
+
+        setTimeout(function() {
+            assert.equal(pool.connections.length, poolConfig.min);
+            pool.drain(done);
+        }, 4);
     });
 });
